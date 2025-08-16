@@ -14,8 +14,14 @@
 (define-constant err-arbitration-resolved (err u112))
 (define-constant err-insufficient-reputation (err u113))
 (define-constant err-arbitrator-not-available (err u114))
+(define-constant err-invalid-rating (err u115))
+(define-constant err-already-endorsed (err u116))
+(define-constant err-self-endorsement (err u117))
+(define-constant err-portfolio-not-found (err u118))
+(define-constant err-invalid-skill-level (err u119))
 
 (define-data-var next-bounty-id uint u1)
+(define-data-var next-portfolio-id uint u1)
 (define-data-var next-arbitration-id uint u1)
 (define-data-var arbitration-fee uint u50)
 (define-data-var min-arbitrator-reputation uint u500)
@@ -115,6 +121,77 @@
     stake-amount: uint,
     vote-side: (string-ascii 20),
     reward-claimed: bool
+  }
+)
+
+;; Developer portfolio and skill verification system
+(define-map developer-portfolios
+  { developer: principal }
+  {
+    bio: (string-ascii 300),
+    github-username: (string-ascii 50),
+    experience-years: uint,
+    hourly-rate: uint,
+    availability-status: (string-ascii 20),
+    total-ratings: uint,
+    average-rating: uint,
+    portfolio-created-at: uint
+  }
+)
+
+(define-map developer-skills
+  { developer: principal, skill-name: (string-ascii 50) }
+  {
+    skill-level: uint,
+    endorsed-by-count: uint,
+    verified: bool,
+    last-updated: uint
+  }
+)
+
+(define-map skill-endorsements
+  { developer: principal, skill-name: (string-ascii 50), endorser: principal }
+  {
+    endorsement-strength: uint,
+    endorsement-comment: (string-ascii 200),
+    endorsed-at: uint
+  }
+)
+
+(define-map work-samples
+  { portfolio-id: uint }
+  {
+    developer: principal,
+    title: (string-ascii 100),
+    description: (string-ascii 400),
+    technology-stack: (string-ascii 200),
+    project-url: (string-ascii 200),
+    completion-time: uint,
+    bounty-id: (optional uint),
+    created-at: uint
+  }
+)
+
+(define-map work-ratings
+  { portfolio-id: uint, rater: principal }
+  {
+    code-quality: uint,
+    communication: uint,
+    timeliness: uint,
+    overall-rating: uint,
+    feedback-comment: (string-ascii 300),
+    rated-at: uint
+  }
+)
+
+(define-map developer-specializations
+  { developer: principal }
+  {
+    primary-specialization: (string-ascii 50),
+    secondary-specializations: (string-ascii 200),
+    preferred-project-size: (string-ascii 20),
+    min-bounty-amount: uint,
+    max-concurrent-bounties: uint
   }
 )
 
@@ -581,3 +658,209 @@
     (ok true)
   )
 )
+
+;; Developer Portfolio Functions
+(define-public (create-developer-portfolio (bio (string-ascii 300)) (github-username (string-ascii 50)) (experience-years uint) (hourly-rate uint))
+  (begin
+    (map-set developer-portfolios
+      { developer: tx-sender }
+      {
+        bio: bio,
+        github-username: github-username,
+        experience-years: experience-years,
+        hourly-rate: hourly-rate,
+        availability-status: "available",
+        total-ratings: u0,
+        average-rating: u0,
+        portfolio-created-at: stacks-block-height
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (update-availability-status (status (string-ascii 20)))
+  (let
+    (
+      (portfolio (unwrap! (map-get? developer-portfolios { developer: tx-sender }) err-portfolio-not-found))
+    )
+    (map-set developer-portfolios
+      { developer: tx-sender }
+      (merge portfolio { availability-status: status })
+    )
+    (ok true)
+  )
+)
+
+(define-public (add-developer-skill (skill-name (string-ascii 50)) (skill-level uint))
+  (begin
+    (asserts! (and (>= skill-level u1) (<= skill-level u10)) err-invalid-skill-level)
+    (map-set developer-skills
+      { developer: tx-sender, skill-name: skill-name }
+      {
+        skill-level: skill-level,
+        endorsed-by-count: u0,
+        verified: false,
+        last-updated: stacks-block-height
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (endorse-skill (developer principal) (skill-name (string-ascii 50)) (endorsement-strength uint) (endorsement-comment (string-ascii 200)))
+  (let
+    (
+      (skill (unwrap! (map-get? developer-skills { developer: developer, skill-name: skill-name }) err-not-found))
+      (existing-endorsement (map-get? skill-endorsements { developer: developer, skill-name: skill-name, endorser: tx-sender }))
+    )
+    (asserts! (not (is-eq tx-sender developer)) err-self-endorsement)
+    (asserts! (is-none existing-endorsement) err-already-endorsed)
+    (asserts! (and (>= endorsement-strength u1) (<= endorsement-strength u5)) err-invalid-rating)
+    (map-set skill-endorsements
+      { developer: developer, skill-name: skill-name, endorser: tx-sender }
+      {
+        endorsement-strength: endorsement-strength,
+        endorsement-comment: endorsement-comment,
+        endorsed-at: stacks-block-height
+      }
+    )
+    (map-set developer-skills
+      { developer: developer, skill-name: skill-name }
+      (merge skill { endorsed-by-count: (+ (get endorsed-by-count skill) u1) })
+    )
+    (ok true)
+  )
+)
+
+(define-public (add-work-sample (title (string-ascii 100)) (description (string-ascii 400)) (technology-stack (string-ascii 200)) (project-url (string-ascii 200)) (completion-time uint) (bounty-id-ref (optional uint)))
+  (let
+    (
+      (portfolio-id (var-get next-portfolio-id))
+    )
+    (unwrap! (map-get? developer-portfolios { developer: tx-sender }) err-portfolio-not-found)
+    (map-set work-samples
+      { portfolio-id: portfolio-id }
+      {
+        developer: tx-sender,
+        title: title,
+        description: description,
+        technology-stack: technology-stack,
+        project-url: project-url,
+        completion-time: completion-time,
+        bounty-id: bounty-id-ref,
+        created-at: stacks-block-height
+      }
+    )
+    (var-set next-portfolio-id (+ portfolio-id u1))
+    (ok portfolio-id)
+  )
+)
+
+(define-public (rate-work-sample (portfolio-id uint) (code-quality uint) (communication uint) (timeliness uint) (feedback-comment (string-ascii 300)))
+  (let
+    (
+      (work-sample (unwrap! (map-get? work-samples { portfolio-id: portfolio-id }) err-portfolio-not-found))
+      (developer (get developer work-sample))
+      (portfolio (unwrap! (map-get? developer-portfolios { developer: developer }) err-portfolio-not-found))
+      (overall-rating (/ (+ code-quality communication timeliness) u3))
+      (existing-rating (map-get? work-ratings { portfolio-id: portfolio-id, rater: tx-sender }))
+    )
+    (asserts! (not (is-eq tx-sender developer)) err-self-endorsement)
+    (asserts! (is-none existing-rating) err-already-endorsed)
+    (asserts! (and (>= code-quality u1) (<= code-quality u5)) err-invalid-rating)
+    (asserts! (and (>= communication u1) (<= communication u5)) err-invalid-rating)
+    (asserts! (and (>= timeliness u1) (<= timeliness u5)) err-invalid-rating)
+    (map-set work-ratings
+      { portfolio-id: portfolio-id, rater: tx-sender }
+      {
+        code-quality: code-quality,
+        communication: communication,
+        timeliness: timeliness,
+        overall-rating: overall-rating,
+        feedback-comment: feedback-comment,
+        rated-at: stacks-block-height
+      }
+    )
+    (let
+      (
+        (new-total-ratings (+ (get total-ratings portfolio) u1))
+        (current-average (get average-rating portfolio))
+        (new-average (if (is-eq current-average u0) 
+                        overall-rating 
+                        (/ (+ (* current-average (get total-ratings portfolio)) overall-rating) new-total-ratings)))
+      )
+      (map-set developer-portfolios
+        { developer: developer }
+        (merge portfolio {
+          total-ratings: new-total-ratings,
+          average-rating: new-average
+        })
+      )
+    )
+    (ok true)
+  )
+)
+
+(define-public (set-specializations (primary-specialization (string-ascii 50)) (secondary-specializations (string-ascii 200)) (preferred-project-size (string-ascii 20)) (min-bounty-amount uint) (max-concurrent-bounties uint))
+  (begin
+    (unwrap! (map-get? developer-portfolios { developer: tx-sender }) err-portfolio-not-found)
+    (map-set developer-specializations
+      { developer: tx-sender }
+      {
+        primary-specialization: primary-specialization,
+        secondary-specializations: secondary-specializations,
+        preferred-project-size: preferred-project-size,
+        min-bounty-amount: min-bounty-amount,
+        max-concurrent-bounties: max-concurrent-bounties
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (verify-skill (developer principal) (skill-name (string-ascii 50)))
+  (let
+    (
+      (skill (unwrap! (map-get? developer-skills { developer: developer, skill-name: skill-name }) err-not-found))
+    )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (>= (get endorsed-by-count skill) u3) err-insufficient-reputation)
+    (map-set developer-skills
+      { developer: developer, skill-name: skill-name }
+      (merge skill { verified: true })
+    )
+    (ok true)
+  )
+)
+
+;; Portfolio read-only functions
+(define-read-only (get-developer-portfolio (developer principal))
+  (map-get? developer-portfolios { developer: developer })
+)
+
+(define-read-only (get-developer-skill (developer principal) (skill-name (string-ascii 50)))
+  (map-get? developer-skills { developer: developer, skill-name: skill-name })
+)
+
+(define-read-only (get-skill-endorsement (developer principal) (skill-name (string-ascii 50)) (endorser principal))
+  (map-get? skill-endorsements { developer: developer, skill-name: skill-name, endorser: endorser })
+)
+
+(define-read-only (get-work-sample (portfolio-id uint))
+  (map-get? work-samples { portfolio-id: portfolio-id })
+)
+
+(define-read-only (get-work-rating (portfolio-id uint) (rater principal))
+  (map-get? work-ratings { portfolio-id: portfolio-id, rater: rater })
+)
+
+(define-read-only (get-developer-specializations (developer principal))
+  (map-get? developer-specializations { developer: developer })
+)
+
+(define-read-only (get-next-portfolio-id)
+  (var-get next-portfolio-id)
+)
+
+
